@@ -1,76 +1,139 @@
+import argparse
 import os
-import pygame 
+from pathlib import Path
 import time
 
-IMAGE_FOLDER = "/images"  # Change this to your desired folder path cause Im not showing yall mine lol 
+import pygame
 
-def FindImageFilenames():
-   
-    lst = []
-    if not os.path.exists(IMAGE_FOLDER):
-        print(f"Error: Folder '{IMAGE_FOLDER}' does not exist.")
-        return lst
+DEFAULT_IMAGE_FOLDER = Path.home() / "Pictures" / "Screenshots"
+SUPPORTED_EXTENSIONS = {".bmp", ".gif", ".jpg", ".jpeg", ".png", ".webp"}
 
-    for filename in os.listdir(IMAGE_FOLDER):
-        if filename.lower().endswith((".bmp", ".gif", ".jpg", ".png")):
-            lst.append(os.path.join(IMAGE_FOLDER, filename))  # Store full path
-    return lst
-def FindDisplayDriver():
-    for driver in ["fbcon", "directfb", "svgalib"]:
-        if not os.getenv("SDL_VIDEODRIVER"):
-            os.putenv("SDL_VIDEODRIVER", driver)
+
+def find_image_filenames(image_folder):
+    """Return supported images in a stable, case-insensitive order."""
+    if not image_folder.is_dir():
+        print(f"Error: folder '{image_folder}' does not exist.")
+        return []
+
+    return sorted(
+        (
+            path
+            for path in image_folder.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def find_display_driver():
+    """Try legacy Linux drivers when no driver was configured by the user."""
+    if pygame.display.get_init():
+        return True
+
+    configured_driver = os.environ.get("SDL_VIDEODRIVER")
+    drivers = (configured_driver,) if configured_driver else (None, "fbcon", "directfb", "svgalib")
+    for driver in drivers:
+        if driver is None:
+            os.environ.pop("SDL_VIDEODRIVER", None)
+        else:
+            os.environ["SDL_VIDEODRIVER"] = driver
         try:
             pygame.display.init()
             return True
         except pygame.error:
-            pass
+            pygame.display.quit()
     return False
 
-def ScaleImageToFit(image, screen_width, screen_height):
-    img_width, img_height = image.get_size()
-    scale_factor = min(screen_width / img_width, screen_height / img_height)
-    new_width = int(img_width * scale_factor)
-    new_height = int(img_height * scale_factor)
-    return pygame.transform.scale(image, (new_width, new_height))
 
-def Main():
-    filenames = FindImageFilenames()
+def scale_image_to_fit(image, screen_size):
+    """Scale an image to fit without stretching or cropping it."""
+    screen_width, screen_height = screen_size
+    image_width, image_height = image.get_size()
+    scale_factor = min(screen_width / image_width, screen_height / image_height)
+    new_size = (
+        max(1, round(image_width * scale_factor)),
+        max(1, round(image_height * scale_factor)),
+    )
+    return pygame.transform.smoothscale(image, new_size)
+
+
+def show_image(screen, filename, screen_size):
+    try:
+        image = pygame.image.load(filename).convert()
+    except (pygame.error, OSError) as error:
+        print(f"Skipping '{filename}': {error}")
+        return False
+
+    image = scale_image_to_fit(image, screen_size)
+    screen.fill((0, 0, 0))
+    position = (
+        (screen_size[0] - image.get_width()) // 2,
+        (screen_size[1] - image.get_height()) // 2,
+    )
+    screen.blit(image, position)
+    pygame.display.flip()
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Display a folder of images fullscreen.")
+    parser.add_argument(
+        "folder",
+        nargs="?",
+        type=Path,
+        default=DEFAULT_IMAGE_FOLDER,
+        help="folder containing images (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=5.0,
+        help="seconds to show each image (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    if args.seconds <= 0:
+        parser.error("--seconds must be greater than zero")
+
+    filenames = find_image_filenames(args.folder)
     if not filenames:
-        print("No image files found in", IMAGE_FOLDER)
+        print(f"No image files found in '{args.folder}'.")
         return
 
-    pygame.init()
-    if not FindDisplayDriver():
-        print("Failed to initialize display driver")
+    if not find_display_driver():
+        print("Failed to initialize a display.")
+        pygame.quit()
         return
+    pygame.font.init()
 
-    width = pygame.display.Info().current_w
-    height = pygame.display.Info().current_h
-    screen = pygame.display.set_mode((width, height), pygame.FULLSCREEN)
+    screen_size = (
+        pygame.display.Info().current_w,
+        pygame.display.Info().current_h,
+    )
+    screen = pygame.display.set_mode(screen_size, pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
     pygame.event.set_grab(True)
+    clock = pygame.time.Clock()
 
-    while True:
-        filename = filenames.pop(0)
-        filenames.append(filename)
+    try:
+        while filenames:
+            for filename in filenames:
+                if not show_image(screen, filename, screen_size):
+                    continue
 
-        image = pygame.image.load(filename)
-        image = ScaleImageToFit(image, width, height)
+                end_time = time.monotonic() + args.seconds
+                while time.monotonic() < end_time:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT or (
+                            event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+                        ):
+                            return
+                    clock.tick(30)
+    finally:
+        pygame.event.set_grab(False)
+        pygame.mouse.set_visible(True)
+        pygame.quit()
 
-        # Center the image on the screen
-        img_x = (width - image.get_width()) // 2
-        img_y = (height - image.get_height()) // 2
-
-        screen.fill((0, 0, 0))  # Fill screen with black before drawing
-        screen.blit(image, (img_x, img_y))
-        pygame.display.update()
-
-        for _ in range(5):
-            pygame.event.pump()
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_ESCAPE]:
-                return
-            time.sleep(1)
 
 if __name__ == "__main__":
-    Main()
+    main()
